@@ -9,11 +9,10 @@
 using namespace std;
 
 // Big integer for non-negative numbers.
-// IMPORTANT: The I/O format in this project uses hexadecimal digits in "little-endian by nibble":
-// the first character is the least-significant hex digit (h0*16^0 + h1*16^1 + ...).
+// input format h_0*16^0 + h_1*16^1 + ... (first char is LSB)
 class BigInt {
 private:
-    vector<uint32_t> data; // little-endian base 2^32 limbs
+    vector<uint32_t> data;
 
     void normalize() {
         while (data.size() > 1 && data.back() == 0) data.pop_back();
@@ -29,36 +28,45 @@ public:
         normalize();
     }
 
-    // Input format: h0*16^0 + h1*16^1 + ... (first char is LSB hex digit)
-    explicit BigInt(const string& hex) {
+    // input format h_0*16^0 + h_1*16^1 + ... (first char is LSB)
+    BigInt(const string& hex) {
         if (hex.empty() || hex == "0") {
             data.push_back(0);
             return;
         }
 
+        // Estimate size to avoid reallocations
+        // Each hex digit is 4 bits. 32 bits per word.
+        // So roughly hex.length() / 8 words.
         data.reserve((hex.length() + 7) / 8);
-        data.push_back(0);
+        data.push_back(0); // Start with 0
 
         for (int i = 0; i < (int)hex.length(); i++) {
-            char c = hex[i];
-            int digit = -1;
+            char c = hex[i];  // h_i is at position i (left to right)
+            int digit;
             if (c >= '0' && c <= '9') digit = c - '0';
             else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
             else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
             else continue;
 
+            // h_i contributes to bit positions [4*i, 4*i+3]
             int bitPos = i * 4;
             int wordPos = bitPos / 32;
             int bitInWord = bitPos % 32;
 
-            if (wordPos >= (int)data.size()) data.resize(wordPos + 1, 0);
-            data[wordPos] |= ((uint32_t)digit << bitInWord);
+            if (wordPos >= (int)data.size()) {
+                data.resize(wordPos + 1, 0);
+            }
 
+            data[wordPos] |= ((uint32_t)digit << bitInWord);
             if (bitInWord > 28) {
-                if (wordPos + 1 >= (int)data.size()) data.resize(wordPos + 2, 0);
+                if (wordPos + 1 >= (int)data.size()) {
+                    data.resize(wordPos + 2, 0);
+                }
                 data[wordPos + 1] |= ((uint32_t)digit >> (32 - bitInWord));
             }
         }
+
         normalize();
     }
 
@@ -97,7 +105,7 @@ public:
 
     BigInt operator+(const BigInt& other) const {
         BigInt result;
-        result.data.clear();
+        result.data.clear(); // Clear initial 0
         uint64_t carry = 0;
         int maxSize = max((int)data.size(), (int)other.data.size());
         result.data.reserve(maxSize + 1);
@@ -214,7 +222,7 @@ public:
             return;
         }
 
-        // Single-word divisor fast path
+        // Fast path: single-word divisor
         if (divisor.data.size() == 1) {
             uint64_t div = divisor.data[0];
             uint64_t rem = 0;
@@ -231,7 +239,8 @@ public:
             return;
         }
 
-        // Knuth Algorithm D
+        // Knuth's Algorithm D
+        // Normalize
         int d = 0;
         uint32_t top = divisor.data.back();
         while ((top & 0x80000000u) == 0) {
@@ -273,6 +282,7 @@ public:
                 rhat += vn_1;
             }
 
+            // Multiply and subtract
             int64_t borrow = 0;
             for (int i = 0; i < n; i++) {
                 uint64_t p = qhat * (uint64_t)v.data[i];
@@ -281,9 +291,11 @@ public:
                 borrow = (int64_t)(p >> 32) - (sub >> 32);
             }
 
+            // Handle the top digit of u (u_{j+n})
             int64_t subTop = (int64_t)u.data[j + n] - borrow;
             u.data[j + n] = (uint32_t)subTop;
 
+            // If we subtracted too much, add back
             if (subTop < 0) {
                 qhat--;
                 uint64_t carry = 0;
@@ -303,6 +315,8 @@ public:
         remainder.normalize();
     }
 
+    // Modular multiplication using optimized multiplication + reduction
+
     BigInt operator/(const BigInt& other) const {
         BigInt q, r;
         divMod(other, q, r);
@@ -315,20 +329,30 @@ public:
         return r;
     }
 
-    static BigInt mulMod(const BigInt& a, const BigInt& b, const BigInt& mod) {
-        if (mod.isOne()) return BigInt(0);
-        return (a * b) % mod;
+    static BigInt mulMod(const BigInt& a, const BigInt& b, const BigInt& n) {
+        if (n.isOne()) return BigInt(0);
+
+        // Use optimized multiplication
+        BigInt product = a * b;
+
+        // Fast reduction for result
+        return product % n;
     }
 
-    static BigInt powMod(const BigInt& base, const BigInt& exp, const BigInt& mod) {
-        if (mod.isOne()) return BigInt(0);
+    static BigInt powerMod(const BigInt& base, const BigInt& exp, const BigInt& n) {
+        if (n.isOne()) return BigInt(0);
+
         BigInt result(1);
-        BigInt b = base % mod;
+        BigInt b = base % n;
+
         int bits = exp.bitLength();
         for (int i = 0; i < bits; i++) {
-            if (exp.getBit(i)) result = mulMod(result, b, mod);
-            b = mulMod(b, b, mod);
+            if (exp.getBit(i)) {
+                result = mulMod(result, b, n);
+            }
+            b = mulMod(b, b, n);
         }
+
         return result;
     }
 
@@ -341,40 +365,48 @@ ostream& operator<<(ostream& os, const BigInt& n) {
         return os;
     }
 
+    // Calculate total number of hex digits needed
     int totalBits = n.bitLength();
-    int totalHexDigits = (totalBits + 3) / 4;
+    int totalHexDigits = (totalBits + 3) / 4;  // Round up to nearest hex digit
 
+    // Output each hex digit from LSB to MSB (left to right)
     for (int i = 0; i < totalHexDigits; i++) {
+        // Extract 4 bits starting at position i*4
         int bitPos = i * 4;
         int wordPos = bitPos / 32;
         int bitInWord = bitPos % 32;
 
         int digit = 0;
         if (wordPos < (int)n.data.size()) {
-            digit = (n.data[wordPos] >> bitInWord) & 0xFu;
+            digit = (n.data[wordPos] >> bitInWord) & 0xF;
+
+            // Handle case where hex digit spans two words
             if (bitInWord > 28 && wordPos + 1 < (int)n.data.size()) {
                 int bitsFromNextWord = bitInWord - 28;
-                digit |= (n.data[wordPos + 1] & ((1u << bitsFromNextWord) - 1u)) << (32 - bitInWord);
+                digit |= (n.data[wordPos + 1] & ((1 << bitsFromNextWord) - 1)) << (32 - bitInWord);
             }
         }
 
-        if (digit < 10) os << char('0' + digit);
-        else os << char('A' + (digit - 10));
+        // Output as hex character
+        if (digit < 10) {
+            os << (char)('0' + digit);
+        }
+        else {
+            os << (char)('A' + digit - 10);
+        }
     }
+
     return os;
 }
 
-// Project 02.03 - ElGamal decryption:
+// ElGamal decryption
 // Input (5 lines): p, g, x, c1, c2   (all in hex little-endian-by-nibble)
-// where p is an odd prime, g is a generator candidate, x is the private key,
-// and (c1, c2) is the ElGamal ciphertext.
-//
-// Decryption:
-//   s   = c1^x mod p
-//   m   = c2 * s^{-1} mod p
-// Since p is prime: s^{-1} ≡ s^(p-2) (mod p).
-//
 // Output (1 line): m
+//
+// Decryption formula:
+//   s   = c1^x mod p
+//   inv = s^(p-2) mod p  (Fermat's little theorem, since p is prime)
+//   m   = c2 * inv mod p
 int main(int argc, char* argv[]) {
     if (argc != 3) {
         cerr << "Usage: " << argv[0] << " <input_file> <output_file>\n";
@@ -393,16 +425,16 @@ int main(int argc, char* argv[]) {
 
     BigInt p(pHex);
     BigInt g(gHex);
-    (void)g; // g is not needed for decryption computation (kept for input format).
+    (void)g; // g is not needed for decryption computation (kept for input format)
     BigInt x(xHex);
     BigInt c1(c1Hex);
     BigInt c2(c2Hex);
 
     // s = c1^x mod p
-    BigInt s = BigInt::powMod(c1, x, p);
+    BigInt s = BigInt::powerMod(c1, x, p);
     // inv = s^(p-2) mod p
     BigInt pMinus2 = p - BigInt(2);
-    BigInt inv = BigInt::powMod(s, pMinus2, p);
+    BigInt inv = BigInt::powerMod(s, pMinus2, p);
     // m = c2 * inv mod p
     BigInt m = BigInt::mulMod(c2 % p, inv, p);
 

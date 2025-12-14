@@ -158,21 +158,41 @@ def main():
     if args.save_tests:
         os.makedirs(args.save_tests, exist_ok=True)
 
+    # Ensure we always have a valid bit-range for generation logic.
+    # (Our prime generator uses at least 8 bits anyway.)
+    max_bits = max(8, int(args.max_bits))
+
     # Match the rubric distribution:
     # 40%: <=64, 30%: (64,128], 20%: (128,256], 10%: (256,512]
     bit_sizes: list[int] = []
-    max_bits = args.max_bits
 
-    bit_sizes.extend([random.randint(8, min(64, max_bits)) for _ in range(args.num_tests * 40 // 100)])
-    bit_sizes.extend([random.randint(65, min(128, max_bits)) for _ in range(args.num_tests * 30 // 100)])
-    if max_bits > 128:
-        bit_sizes.extend([random.randint(129, min(256, max_bits)) for _ in range(args.num_tests * 20 // 100)])
-    else:
-        bit_sizes.extend([random.randint(65, max_bits) for _ in range(args.num_tests * 20 // 100)])
-    if max_bits > 256:
-        bit_sizes.extend([random.randint(257, min(512, max_bits)) for _ in range(args.num_tests * 10 // 100)])
-    else:
-        bit_sizes.extend([random.randint(max(65, max_bits - 50), max_bits) for _ in range(args.num_tests * 10 // 100)])
+    # Desired counts per bucket (we'll reassign buckets that are not feasible).
+    n1 = args.num_tests * 40 // 100
+    n2 = args.num_tests * 30 // 100
+    n3 = args.num_tests * 20 // 100
+    n4 = args.num_tests * 10 // 100
+
+    # Bucket definitions: (low, high, count)
+    # We will generate from a bucket only if low <= high after clamping to max_bits.
+    buckets = [
+        (8,  min(64,  max_bits), n1),
+        (65, min(128, max_bits), n2),
+        (129, min(256, max_bits), n3),
+        (257, min(512, max_bits), n4),
+    ]
+
+    # Approach B: validate each bucket range; if invalid, fall back to the last valid range.
+    last_valid = (8, min(64, max_bits))
+    for lo, hi, cnt in buckets:
+        if cnt <= 0:
+            continue
+        if lo <= hi:
+            last_valid = (lo, hi)
+            bit_sizes.extend([random.randint(lo, hi) for _ in range(cnt)])
+        else:
+            # Fallback to the nearest earlier feasible bucket range.
+            fb_lo, fb_hi = last_valid
+            bit_sizes.extend([random.randint(fb_lo, fb_hi) for _ in range(cnt)])
 
     while len(bit_sizes) < args.num_tests:
         bit_sizes.append(random.randint(8, min(64, max_bits)))
